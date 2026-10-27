@@ -1,0 +1,488 @@
+--[[
+    Auto Fisher - Face Lake
+]]
+
+local Players = game:GetService("Players")
+local UserInputService = game:GetService("UserInputService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local RunService = game:GetService("RunService")
+local PathfindingService = game:GetService("PathfindingService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+local isRunning = false
+local isMinimized = false
+local waitingForBite = false
+local lastCast = 0
+local CAST_COOLDOWN = 2.8
+local tracked = {}
+local known = {}
+local DROP_THRESHOLD = 0.22
+local BITE_TIMEOUT = 22
+local lastMove = 0
+local MOVE_INTERVAL = 300
+
+local spots = {
+    Vector3.new(401.78, 91.55, -628.44),
+    Vector3.new(396.48, 92.66, -654.72),
+    Vector3.new(420.25, 92.68, -679.58),
+    Vector3.new(451.76, 92.53, -657.18),
+    Vector3.new(447.83, 92.11, -626.38)
+}
+local spotIndex = 1
+local SPOT_TOLERANCE = 8
+
+-- Approximate center of the lake (average of the 5 spots)
+local LAKE_CENTER = Vector3.new(423.6, 92, -649.3)
+
+-------------------------------------------------
+-- GUI
+-------------------------------------------------
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "AutoFishGui"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = playerGui
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 240, 0, 190)
+mainFrame.Position = UDim2.new(0, 20, 0.5, -95)
+mainFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = screenGui
+
+local mainCorner = Instance.new("UICorner")
+mainCorner.CornerRadius = UDim.new(0, 10)
+mainCorner.Parent = mainFrame
+
+local mainStroke = Instance.new("UIStroke")
+mainStroke.Color = Color3.fromRGB(40, 40, 48)
+mainStroke.Thickness = 1
+mainStroke.Parent = mainFrame
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 40)
+header.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+header.BorderSizePixel = 0
+header.Parent = mainFrame
+
+local headerCorner = Instance.new("UICorner")
+headerCorner.CornerRadius = UDim.new(0, 10)
+headerCorner.Parent = header
+
+local headerTitle = Instance.new("TextLabel")
+headerTitle.Size = UDim2.new(1, -50, 1, 0)
+headerTitle.Position = UDim2.new(0, 14, 0, 0)
+headerTitle.BackgroundTransparency = 1
+headerTitle.Text = "Auto Fisher"
+headerTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+headerTitle.Font = Enum.Font.GothamBold
+headerTitle.TextSize = 16
+headerTitle.TextXAlignment = Enum.TextXAlignment.Left
+headerTitle.Parent = header
+
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Size = UDim2.new(0, 28, 0, 22)
+minimizeBtn.Position = UDim2.new(1, -36, 0.5, -11)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+minimizeBtn.Text = "−"
+minimizeBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.TextSize = 16
+minimizeBtn.Parent = header
+
+local minCorner = Instance.new("UICorner")
+minCorner.CornerRadius = UDim.new(0, 5)
+minCorner.Parent = minimizeBtn
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -20, 1, -56)
+content.Position = UDim2.new(0, 10, 0, 48)
+content.BackgroundTransparency = 1
+content.Parent = mainFrame
+
+local statusBox = Instance.new("Frame")
+statusBox.Size = UDim2.new(1, 0, 0, 40)
+statusBox.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+statusBox.BorderSizePixel = 0
+statusBox.Parent = content
+
+local statusCorner = Instance.new("UICorner")
+statusCorner.CornerRadius = UDim.new(0, 8)
+statusCorner.Parent = statusBox
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -16, 1, -8)
+statusLabel.Position = UDim2.new(0, 10, 0, 4)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Status: Stopped"
+statusLabel.TextColor3 = Color3.fromRGB(170, 170, 180)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 13
+statusLabel.TextWrapped = true
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = statusBox
+
+local timerLabel = Instance.new("TextLabel")
+timerLabel.Size = UDim2.new(1, 0, 0, 22)
+timerLabel.Position = UDim2.new(0, 0, 0, 46)
+timerLabel.BackgroundTransparency = 1
+timerLabel.Text = "Next move: --:--"
+timerLabel.TextColor3 = Color3.fromRGB(140, 180, 255)
+timerLabel.Font = Enum.Font.Gotham
+timerLabel.TextSize = 12
+timerLabel.Parent = content
+
+local toggleSection = Instance.new("Frame")
+toggleSection.Size = UDim2.new(1, 0, 0, 42)
+toggleSection.Position = UDim2.new(0, 0, 0, 72)
+toggleSection.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+toggleSection.BorderSizePixel = 0
+toggleSection.Parent = content
+
+local toggleCorner = Instance.new("UICorner")
+toggleCorner.CornerRadius = UDim.new(0, 8)
+toggleCorner.Parent = toggleSection
+
+local toggleLabel = Instance.new("TextLabel")
+toggleLabel.Size = UDim2.new(0.55, 0, 1, 0)
+toggleLabel.Position = UDim2.new(0, 12, 0, 0)
+toggleLabel.BackgroundTransparency = 1
+toggleLabel.Text = "Auto Fish"
+toggleLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+toggleLabel.Font = Enum.Font.GothamMedium
+toggleLabel.TextSize = 14
+toggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+toggleLabel.Parent = toggleSection
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(0, 70, 0, 26)
+toggleBtn.Position = UDim2.new(1, -82, 0.5, -13)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+toggleBtn.Text = "OFF"
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 13
+toggleBtn.Parent = toggleSection
+
+local toggleBtnCorner = Instance.new("UICorner")
+toggleBtnCorner.CornerRadius = UDim.new(0, 6)
+toggleBtnCorner.Parent = toggleBtn
+
+local function setStatus(text)
+    statusLabel.Text = "Status: " .. text
+end
+
+local function updateButton()
+    if isRunning then
+        toggleBtn.Text = "ON"
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(40, 150, 70)
+    else
+        toggleBtn.Text = "OFF"
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+        setStatus("Stopped")
+        timerLabel.Text = "Next move: --:--"
+    end
+end
+
+local function toggleMinimize()
+    isMinimized = not isMinimized
+    content.Visible = not isMinimized
+    if isMinimized then
+        mainFrame.Size = UDim2.new(0, 240, 0, 40)
+        minimizeBtn.Text = "+"
+    else
+        mainFrame.Size = UDim2.new(0, 240, 0, 190)
+        minimizeBtn.Text = "−"
+    end
+end
+
+local function updateTimer()
+    if not isRunning then return end
+    local remaining = math.max(0, MOVE_INTERVAL - (os.clock() - lastMove))
+    local mins = math.floor(remaining / 60)
+    local secs = math.floor(remaining % 60)
+    timerLabel.Text = string.format("Next move: %d:%02d", mins, secs)
+end
+
+-------------------------------------------------
+-- Helpers
+-------------------------------------------------
+local function click()
+    local cam = workspace.CurrentCamera
+    if not cam then return end
+    local x = cam.ViewportSize.X / 2
+    local y = cam.ViewportSize.Y / 2
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+    task.wait(0.04)
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+end
+
+local function isRodEquipped()
+    local char = player.Character
+    if not char then return false end
+    for _, tool in ipairs(char:GetChildren()) do
+        if tool:IsA("Tool") and tool.Name:lower():find("rod") then
+            return true
+        end
+    end
+    return false
+end
+
+local function isNearSpot(index)
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return false end
+    return (root.Position - spots[index]).Magnitude <= SPOT_TOLERANCE
+end
+
+local function faceLake()
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return end
+
+    local lookAt = Vector3.new(LAKE_CENTER.X, root.Position.Y, LAKE_CENTER.Z)
+    root.CFrame = CFrame.lookAt(root.Position, lookAt)
+    task.wait(0.2)
+end
+
+local function snapshot()
+    known = {}
+    for _, v in ipairs(workspace:GetDescendants()) do
+        known[v] = true
+    end
+end
+
+local function findNewParts()
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    if not root then return {} end
+
+    local parts = {}
+    for _, v in ipairs(workspace:GetDescendants()) do
+        if not known[v] and v:IsA("BasePart") and not v:IsDescendantOf(char) then
+            local dist = (v.Position - root.Position).Magnitude
+            if dist > 2 and dist < 35 then
+                table.insert(parts, v)
+            end
+        end
+    end
+    return parts
+end
+
+local function pull()
+    if not waitingForBite then return end
+    waitingForBite = false
+    click()
+    tracked = {}
+    setStatus("Caught!")
+end
+
+local function forceRecast()
+    waitingForBite = false
+    tracked = {}
+    click()
+    setStatus("Recasting...")
+    task.wait(1)
+end
+
+local function pathfindTo(targetPos)
+    local char = player.Character
+    local root = char and char:FindFirstChild("HumanoidRootPart")
+    local humanoid = char and char:FindFirstChildOfClass("Humanoid")
+    if not root or not humanoid then return end
+
+    local path = PathfindingService:CreatePath({
+        AgentRadius = 2,
+        AgentHeight = 5,
+        AgentCanJump = true
+    })
+
+    local ok = pcall(function()
+        path:ComputeAsync(root.Position, targetPos)
+    end)
+
+    if not ok or path.Status ~= Enum.PathStatus.Success then
+        humanoid:MoveTo(targetPos)
+        task.wait(2)
+        faceLake()
+        return
+    end
+
+    for _, wp in ipairs(path:GetWaypoints()) do
+        if not isRunning then break end
+        humanoid:MoveTo(wp.Position)
+        if wp.Action == Enum.PathWaypointAction.Jump then
+            humanoid.Jump = true
+        end
+        local finished = false
+        local conn
+        conn = humanoid.MoveToFinished:Connect(function()
+            finished = true
+            conn:Disconnect()
+        end)
+        local t = os.clock()
+        while not finished and os.clock() - t < 4 do
+            task.wait(0.1)
+        end
+        if conn then conn:Disconnect() end
+    end
+
+    faceLake()
+end
+
+local function goToSpot(index)
+    setStatus("Going to spot " .. index .. "...")
+    waitingForBite = false
+    tracked = {}
+    pathfindTo(spots[index])
+    spotIndex = index
+    lastMove = os.clock()
+    task.wait(0.3)
+end
+
+-------------------------------------------------
+-- Detection
+-------------------------------------------------
+local biteStart = 0
+RunService.Heartbeat:Connect(function()
+    if not isRunning or not waitingForBite then return end
+
+    if os.clock() - biteStart > BITE_TIMEOUT then
+        setStatus("Timeout...")
+        forceRecast()
+        return
+    end
+
+    local anyAlive = false
+    for i = #tracked, 1, -1 do
+        local e = tracked[i]
+        if not e.part or not e.part.Parent then
+            table.remove(tracked, i)
+        else
+            anyAlive = true
+            local drop = e.startY - e.part.Position.Y
+            if drop > DROP_THRESHOLD then
+                pull()
+                return
+            end
+        end
+    end
+
+    if not anyAlive then
+        setStatus("Bobber gone...")
+        forceRecast()
+    end
+end)
+
+-------------------------------------------------
+-- Main
+-------------------------------------------------
+task.spawn(function()
+    while true do
+        if isRunning then
+            updateTimer()
+
+            if not isNearSpot(spotIndex) then
+                goToSpot(spotIndex)
+            end
+
+            if os.clock() - lastMove > MOVE_INTERVAL then
+                local nextIndex = spotIndex % #spots + 1
+                goToSpot(nextIndex)
+            end
+
+            if not isRodEquipped() then
+                setStatus("Equip fishing rod!")
+                waitingForBite = false
+                tracked = {}
+                task.wait(1)
+            elseif not waitingForBite and os.clock() - lastCast >= CAST_COOLDOWN then
+                -- Face the lake before every cast
+                faceLake()
+                setStatus("Casting...")
+                snapshot()
+                click()
+                lastCast = os.clock()
+                task.wait(2.5)
+
+                local parts = findNewParts()
+                if #parts > 0 then
+                    tracked = {}
+                    for _, p in ipairs(parts) do
+                        table.insert(tracked, {part = p, startY = p.Position.Y})
+                    end
+                    biteStart = os.clock()
+                    waitingForBite = true
+                    setStatus("Waiting for bite...")
+                else
+                    setStatus("No bobber")
+                    task.wait(0.6)
+                end
+            end
+        else
+            waitingForBite = false
+            tracked = {}
+        end
+        task.wait(0.15)
+    end
+end)
+
+-------------------------------------------------
+-- Controls
+-------------------------------------------------
+toggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    updateButton()
+    if isRunning then
+        setStatus("Starting...")
+        waitingForBite = false
+        lastMove = os.clock()
+        spotIndex = 1
+    else
+        waitingForBite = false
+        tracked = {}
+    end
+end)
+
+minimizeBtn.MouseButton1Click:Connect(toggleMinimize)
+
+UserInputService.InputBegan:Connect(function(input, gp)
+    if gp then return end
+    if input.KeyCode == Enum.KeyCode.RightShift then
+        isRunning = not isRunning
+        updateButton()
+        if isRunning then
+            setStatus("Starting...")
+            waitingForBite = false
+            lastMove = os.clock()
+            spotIndex = 1
+        else
+            waitingForBite = false
+            tracked = {}
+        end
+    end
+end)
+
+-- Draggable
+local dragging, dragStart, startPos
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+    end
+end)
+header.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+UserInputService.InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+print("[AutoFish] Face lake version loaded")
