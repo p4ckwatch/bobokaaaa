@@ -1,5 +1,7 @@
 --[[
-    Auto Fisher - Face Lake
+    Auto Fisher + Fish Quiz Solver (Combined, FIXED v8)
+    - Quiz: tries FireServer(index) first, then VIM click with GuiInset fix
+    - Fishing logic unchanged
 ]]
 
 local Players = game:GetService("Players")
@@ -7,10 +9,15 @@ local UserInputService = game:GetService("UserInputService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
 local RunService = game:GetService("RunService")
 local PathfindingService = game:GetService("PathfindingService")
+local GuiService = game:GetService("GuiService")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
+-------------------------------------------------
+-- FISHING STATE
+-------------------------------------------------
 local isRunning = false
 local isMinimized = false
 local waitingForBite = false
@@ -32,9 +39,20 @@ local spots = {
 }
 local spotIndex = 1
 local SPOT_TOLERANCE = 8
-
--- Approximate center of the lake (average of the 5 spots)
 local LAKE_CENTER = Vector3.new(423.6, 92, -649.3)
+
+-------------------------------------------------
+-- QUIZ STATE
+-------------------------------------------------
+local fishList = {
+    "Salmon", "Carp", "Trout", "Red Snapper", "Tuna", "Catfish",
+    "Grouper", "Eel", "Tilapia", "Swordfish", "Infernal Fish",
+    "Void Fish", "Spirit Fish", "Blue Tang", "Clownfish",
+    "Puffer Fish", "Shark", "Koi"
+}
+
+local AUTO_ANSWER_QUIZ = true
+local TRY_REMOTE_FIRST = true  -- set false to only use VIM clicks
 
 -------------------------------------------------
 -- GUI
@@ -45,8 +63,8 @@ screenGui.ResetOnSpawn = false
 screenGui.Parent = playerGui
 
 local mainFrame = Instance.new("Frame")
-mainFrame.Size = UDim2.new(0, 240, 0, 190)
-mainFrame.Position = UDim2.new(0, 20, 0.5, -95)
+mainFrame.Size = UDim2.new(0, 240, 0, 210)
+mainFrame.Position = UDim2.new(0, 20, 0.5, -105)
 mainFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
 mainFrame.BorderSizePixel = 0
 mainFrame.Parent = screenGui
@@ -74,7 +92,7 @@ local headerTitle = Instance.new("TextLabel")
 headerTitle.Size = UDim2.new(1, -50, 1, 0)
 headerTitle.Position = UDim2.new(0, 14, 0, 0)
 headerTitle.BackgroundTransparency = 1
-headerTitle.Text = "Auto Fisher"
+headerTitle.Text = "Auto Fisher + Quiz"
 headerTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
 headerTitle.Font = Enum.Font.GothamBold
 headerTitle.TextSize = 16
@@ -133,9 +151,20 @@ timerLabel.Font = Enum.Font.Gotham
 timerLabel.TextSize = 12
 timerLabel.Parent = content
 
+local quizLabel = Instance.new("TextLabel")
+quizLabel.Size = UDim2.new(1, 0, 0, 20)
+quizLabel.Position = UDim2.new(0, 0, 0, 66)
+quizLabel.BackgroundTransparency = 1
+quizLabel.Text = "Quiz: idle"
+quizLabel.TextColor3 = Color3.fromRGB(180, 220, 180)
+quizLabel.Font = Enum.Font.Gotham
+quizLabel.TextSize = 12
+quizLabel.TextXAlignment = Enum.TextXAlignment.Left
+quizLabel.Parent = content
+
 local toggleSection = Instance.new("Frame")
 toggleSection.Size = UDim2.new(1, 0, 0, 42)
-toggleSection.Position = UDim2.new(0, 0, 0, 72)
+toggleSection.Position = UDim2.new(0, 0, 0, 90)
 toggleSection.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
 toggleSection.BorderSizePixel = 0
 toggleSection.Parent = content
@@ -169,9 +198,8 @@ local toggleBtnCorner = Instance.new("UICorner")
 toggleBtnCorner.CornerRadius = UDim.new(0, 6)
 toggleBtnCorner.Parent = toggleBtn
 
-local function setStatus(text)
-    statusLabel.Text = "Status: " .. text
-end
+local function setStatus(text) statusLabel.Text = "Status: " .. text end
+local function setQuizStatus(text) quizLabel.Text = "Quiz: " .. text end
 
 local function updateButton()
     if isRunning then
@@ -192,7 +220,7 @@ local function toggleMinimize()
         mainFrame.Size = UDim2.new(0, 240, 0, 40)
         minimizeBtn.Text = "+"
     else
-        mainFrame.Size = UDim2.new(0, 240, 0, 190)
+        mainFrame.Size = UDim2.new(0, 240, 0, 210)
         minimizeBtn.Text = "−"
     end
 end
@@ -206,7 +234,7 @@ local function updateTimer()
 end
 
 -------------------------------------------------
--- Helpers
+-- Fishing helpers
 -------------------------------------------------
 local function click()
     local cam = workspace.CurrentCamera
@@ -222,9 +250,7 @@ local function isRodEquipped()
     local char = player.Character
     if not char then return false end
     for _, tool in ipairs(char:GetChildren()) do
-        if tool:IsA("Tool") and tool.Name:lower():find("rod") then
-            return true
-        end
+        if tool:IsA("Tool") and tool.Name:lower():find("rod") then return true end
     end
     return false
 end
@@ -240,7 +266,6 @@ local function faceLake()
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return end
-
     local lookAt = Vector3.new(LAKE_CENTER.X, root.Position.Y, LAKE_CENTER.Z)
     root.CFrame = CFrame.lookAt(root.Position, lookAt)
     task.wait(0.2)
@@ -248,23 +273,18 @@ end
 
 local function snapshot()
     known = {}
-    for _, v in ipairs(workspace:GetDescendants()) do
-        known[v] = true
-    end
+    for _, v in ipairs(workspace:GetDescendants()) do known[v] = true end
 end
 
 local function findNewParts()
     local char = player.Character
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return {} end
-
     local parts = {}
     for _, v in ipairs(workspace:GetDescendants()) do
         if not known[v] and v:IsA("BasePart") and not v:IsDescendantOf(char) then
             local dist = (v.Position - root.Position).Magnitude
-            if dist > 2 and dist < 35 then
-                table.insert(parts, v)
-            end
+            if dist > 2 and dist < 35 then table.insert(parts, v) end
         end
     end
     return parts
@@ -291,30 +311,18 @@ local function pathfindTo(targetPos)
     local root = char and char:FindFirstChild("HumanoidRootPart")
     local humanoid = char and char:FindFirstChildOfClass("Humanoid")
     if not root or not humanoid then return end
-
-    local path = PathfindingService:CreatePath({
-        AgentRadius = 2,
-        AgentHeight = 5,
-        AgentCanJump = true
-    })
-
-    local ok = pcall(function()
-        path:ComputeAsync(root.Position, targetPos)
-    end)
-
+    local path = PathfindingService:CreatePath({AgentRadius = 2, AgentHeight = 5, AgentCanJump = true})
+    local ok = pcall(function() path:ComputeAsync(root.Position, targetPos) end)
     if not ok or path.Status ~= Enum.PathStatus.Success then
         humanoid:MoveTo(targetPos)
         task.wait(2)
         faceLake()
         return
     end
-
     for _, wp in ipairs(path:GetWaypoints()) do
         if not isRunning then break end
         humanoid:MoveTo(wp.Position)
-        if wp.Action == Enum.PathWaypointAction.Jump then
-            humanoid.Jump = true
-        end
+        if wp.Action == Enum.PathWaypointAction.Jump then humanoid.Jump = true end
         local finished = false
         local conn
         conn = humanoid.MoveToFinished:Connect(function()
@@ -322,12 +330,9 @@ local function pathfindTo(targetPos)
             conn:Disconnect()
         end)
         local t = os.clock()
-        while not finished and os.clock() - t < 4 do
-            task.wait(0.1)
-        end
+        while not finished and os.clock() - t < 4 do task.wait(0.1) end
         if conn then conn:Disconnect() end
     end
-
     faceLake()
 end
 
@@ -342,18 +347,160 @@ local function goToSpot(index)
 end
 
 -------------------------------------------------
--- Detection
+-- Quiz detection (v8 — FireServer then VIM fallback)
+-------------------------------------------------
+local function getQuizPanel()
+    local fc = playerGui:FindFirstChild("FishingCheck")
+    if not fc then return nil end
+    local one = fc:FindFirstChild("1")
+    if not one then return nil end
+    local four = one:FindFirstChild("4")
+    if not four then return nil end
+    local two = four:FindFirstChild("2")
+    if not two then return nil end
+    return two:FindFirstChild("1")
+end
+
+local function getQuizTarget()
+    local panel = getQuizPanel()
+    if not panel then return nil, nil end
+    local msg = panel:FindFirstChild("Message")
+    if msg and msg:IsA("TextLabel") then
+        local text = msg.Text:lower()
+        local best
+        for _, fish in ipairs(fishList) do
+            local nf = fish:lower()
+            if text:find(nf, 1, true) then
+                if not best or #fish > #best then best = fish end
+            end
+        end
+        if best then return best, panel end
+    end
+    return nil, panel
+end
+
+local function getChoiceList(panel)
+    local list = {}
+    if not panel then return list end
+    for _, child in ipairs(panel:GetChildren()) do
+        if child.Name == "Choice" and child:IsA("GuiButton") then
+            local lbl = child:FindFirstChild("Label", true)
+            table.insert(list, {btn = child, label = lbl and lbl.Text or ""})
+        end
+    end
+    return list
+end
+
+local function fireRemoteDirect(index)
+    local ok, err = pcall(function()
+        local remotes = ReplicatedStorage:FindFirstChild("Remotes")
+        if not remotes then error("no Remotes folder") end
+        local fc = remotes:FindFirstChild("FishingCheck")
+        if not fc then error("no FishingCheck remote") end
+        fc:FireServer(index)
+    end)
+    if not ok then print("[Quiz] FireServer failed:", err) end
+    return ok
+end
+
+local function realClick(guiObj)
+    local abs = guiObj.AbsolutePosition
+    local size = guiObj.AbsoluteSize
+    local inset = GuiService:GetGuiInset()
+    local x = abs.X + size.X / 2
+    local y = abs.Y + size.Y / 2 + inset.Y
+    print("[Quiz] VIM click at", x, y, "(raw abs:", abs.X, abs.Y, "inset:", inset.Y, ")")
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
+    task.wait(0.1)
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
+end
+
+local function answerQuiz()
+    local target, panel = getQuizTarget()
+    if not target or not panel then return false end
+
+    local choices = getChoiceList(panel)
+    if #choices == 0 then
+        setQuizStatus("waiting: " .. target)
+        return false
+    end
+
+    local targetLower = target:lower()
+    local correctIdx, correctChoice
+    for i, c in ipairs(choices) do
+        if c.label:lower() == targetLower then
+            correctIdx = i
+            correctChoice = c.btn
+            break
+        end
+    end
+    if not correctIdx then
+        print("[Quiz] Target:", target, "| not among choices:", table.concat((function()
+            local t = {}
+            for _, c in ipairs(choices) do table.insert(t, c.label) end
+            return t
+        end)(), ", "))
+        setQuizStatus("no match: " .. target)
+        return false
+    end
+
+    print("[Quiz] Target:", target, "| index:", correctIdx, "| label:", choices[correctIdx].label)
+
+    -- Strategy 1: fire remote directly (bypasses input layer)
+    if TRY_REMOTE_FIRST then
+        print("[Quiz] Attempt: FireServer(" .. correctIdx .. ")")
+        fireRemoteDirect(correctIdx)
+        task.wait(0.5)
+        if not getQuizPanel() then
+            setQuizStatus("answered: " .. target)
+            return true
+        end
+        print("[Quiz] Remote didn't work, trying VIM")
+    end
+
+    -- Strategy 2: real VIM click with inset fix + longer delay
+    if AUTO_ANSWER_QUIZ then
+        print("[Quiz] Attempt: VIM click")
+        realClick(correctChoice)
+        task.wait(0.6)
+        if not getQuizPanel() then
+            setQuizStatus("answered: " .. target)
+            return true
+        end
+        print("[Quiz] VIM click didn't register")
+    end
+
+    return false
+end
+
+local quizBusy = false
+task.spawn(function()
+    while true do
+        task.wait(0.2)
+        if quizBusy then continue end
+        if getQuizTarget() then
+            quizBusy = true
+            local t0 = os.clock()
+            while os.clock() - t0 < 8 do
+                if answerQuiz() then break end
+                task.wait(0.4)
+            end
+            quizBusy = false
+        end
+    end
+end)
+
+-------------------------------------------------
+-- Bite detection
 -------------------------------------------------
 local biteStart = 0
 RunService.Heartbeat:Connect(function()
     if not isRunning or not waitingForBite then return end
-
     if os.clock() - biteStart > BITE_TIMEOUT then
         setStatus("Timeout...")
         forceRecast()
         return
     end
-
     local anyAlive = false
     for i = #tracked, 1, -1 do
         local e = tracked[i]
@@ -362,13 +509,9 @@ RunService.Heartbeat:Connect(function()
         else
             anyAlive = true
             local drop = e.startY - e.part.Position.Y
-            if drop > DROP_THRESHOLD then
-                pull()
-                return
-            end
+            if drop > DROP_THRESHOLD then pull() return end
         end
     end
-
     if not anyAlive then
         setStatus("Bobber gone...")
         forceRecast()
@@ -376,36 +519,29 @@ RunService.Heartbeat:Connect(function()
 end)
 
 -------------------------------------------------
--- Main
+-- Main fishing loop
 -------------------------------------------------
 task.spawn(function()
     while true do
         if isRunning then
             updateTimer()
-
-            if not isNearSpot(spotIndex) then
-                goToSpot(spotIndex)
-            end
-
+            if not isNearSpot(spotIndex) then goToSpot(spotIndex) end
             if os.clock() - lastMove > MOVE_INTERVAL then
                 local nextIndex = spotIndex % #spots + 1
                 goToSpot(nextIndex)
             end
-
             if not isRodEquipped() then
                 setStatus("Equip fishing rod!")
                 waitingForBite = false
                 tracked = {}
                 task.wait(1)
             elseif not waitingForBite and os.clock() - lastCast >= CAST_COOLDOWN then
-                -- Face the lake before every cast
                 faceLake()
                 setStatus("Casting...")
                 snapshot()
                 click()
                 lastCast = os.clock()
                 task.wait(2.5)
-
                 local parts = findNewParts()
                 if #parts > 0 then
                     tracked = {}
@@ -431,7 +567,7 @@ end)
 -------------------------------------------------
 -- Controls
 -------------------------------------------------
-toggleBtn.MouseButton1Click:Connect(function()
+local function startStop()
     isRunning = not isRunning
     updateButton()
     if isRunning then
@@ -443,28 +579,16 @@ toggleBtn.MouseButton1Click:Connect(function()
         waitingForBite = false
         tracked = {}
     end
-end)
+end
 
+toggleBtn.MouseButton1Click:Connect(startStop)
 minimizeBtn.MouseButton1Click:Connect(toggleMinimize)
 
 UserInputService.InputBegan:Connect(function(input, gp)
     if gp then return end
-    if input.KeyCode == Enum.KeyCode.RightShift then
-        isRunning = not isRunning
-        updateButton()
-        if isRunning then
-            setStatus("Starting...")
-            waitingForBite = false
-            lastMove = os.clock()
-            spotIndex = 1
-        else
-            waitingForBite = false
-            tracked = {}
-        end
-    end
+    if input.KeyCode == Enum.KeyCode.RightShift then startStop() end
 end)
 
--- Draggable
 local dragging, dragStart, startPos
 header.InputBegan:Connect(function(input)
     if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
@@ -485,4 +609,4 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
-print("[AutoFish] Face lake version loaded")
+print("[AutoFish+Quiz] Loaded (v8)")
