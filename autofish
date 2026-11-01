@@ -1,7 +1,5 @@
 --[[
-    Auto Fisher + Fish Quiz Solver (Combined, FIXED v8)
-    - Quiz: tries FireServer(index) first, then VIM click with GuiInset fix
-    - Fishing logic unchanged
+    Auto Fisher + Quiz (Water Spots)
 ]]
 
 local Players = game:GetService("Players")
@@ -22,7 +20,7 @@ local isRunning = false
 local isMinimized = false
 local waitingForBite = false
 local lastCast = 0
-local CAST_COOLDOWN = 2.8
+local CAST_COOLDOWN = 1
 local tracked = {}
 local known = {}
 local DROP_THRESHOLD = 0.22
@@ -31,15 +29,13 @@ local lastMove = 0
 local MOVE_INTERVAL = 300
 
 local spots = {
-    Vector3.new(401.78, 91.55, -628.44),
-    Vector3.new(396.48, 92.66, -654.72),
-    Vector3.new(420.25, 92.68, -679.58),
-    Vector3.new(451.76, 92.53, -657.18),
-    Vector3.new(447.83, 92.11, -626.38)
+    Vector3.new(420.62, 87.44, -643.78),
+    Vector3.new(432.13, 87.43, -644.65),
+    Vector3.new(430.91, 87.48, -653.46),
+    Vector3.new(418.06, 87.47, -654.26)
 }
 local spotIndex = 1
-local SPOT_TOLERANCE = 8
-local LAKE_CENTER = Vector3.new(423.6, 92, -649.3)
+local SPOT_TOLERANCE = 6
 
 -------------------------------------------------
 -- QUIZ STATE
@@ -52,7 +48,7 @@ local fishList = {
 }
 
 local AUTO_ANSWER_QUIZ = true
-local TRY_REMOTE_FIRST = true  -- set false to only use VIM clicks
+local TRY_REMOTE_FIRST = true
 
 -------------------------------------------------
 -- GUI
@@ -242,7 +238,7 @@ local function click()
     local x = cam.ViewportSize.X / 2
     local y = cam.ViewportSize.Y / 2
     VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
-    task.wait(0.04)
+    task.wait(0.25)
     VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
 end
 
@@ -260,15 +256,6 @@ local function isNearSpot(index)
     local root = char and char:FindFirstChild("HumanoidRootPart")
     if not root then return false end
     return (root.Position - spots[index]).Magnitude <= SPOT_TOLERANCE
-end
-
-local function faceLake()
-    local char = player.Character
-    local root = char and char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local lookAt = Vector3.new(LAKE_CENTER.X, root.Position.Y, LAKE_CENTER.Z)
-    root.CFrame = CFrame.lookAt(root.Position, lookAt)
-    task.wait(0.2)
 end
 
 local function snapshot()
@@ -316,7 +303,6 @@ local function pathfindTo(targetPos)
     if not ok or path.Status ~= Enum.PathStatus.Success then
         humanoid:MoveTo(targetPos)
         task.wait(2)
-        faceLake()
         return
     end
     for _, wp in ipairs(path:GetWaypoints()) do
@@ -333,7 +319,6 @@ local function pathfindTo(targetPos)
         while not finished and os.clock() - t < 4 do task.wait(0.1) end
         if conn then conn:Disconnect() end
     end
-    faceLake()
 end
 
 local function goToSpot(index)
@@ -347,7 +332,7 @@ local function goToSpot(index)
 end
 
 -------------------------------------------------
--- Quiz detection (v8 — FireServer then VIM fallback)
+-- Quiz detection
 -------------------------------------------------
 local function getQuizPanel()
     local fc = playerGui:FindFirstChild("FishingCheck")
@@ -409,7 +394,6 @@ local function realClick(guiObj)
     local inset = GuiService:GetGuiInset()
     local x = abs.X + size.X / 2
     local y = abs.Y + size.Y / 2 + inset.Y
-    print("[Quiz] VIM click at", x, y, "(raw abs:", abs.X, abs.Y, "inset:", inset.Y, ")")
     VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 1)
     task.wait(0.1)
     VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 1)
@@ -435,39 +419,26 @@ local function answerQuiz()
         end
     end
     if not correctIdx then
-        print("[Quiz] Target:", target, "| not among choices:", table.concat((function()
-            local t = {}
-            for _, c in ipairs(choices) do table.insert(t, c.label) end
-            return t
-        end)(), ", "))
         setQuizStatus("no match: " .. target)
         return false
     end
 
-    print("[Quiz] Target:", target, "| index:", correctIdx, "| label:", choices[correctIdx].label)
-
-    -- Strategy 1: fire remote directly (bypasses input layer)
     if TRY_REMOTE_FIRST then
-        print("[Quiz] Attempt: FireServer(" .. correctIdx .. ")")
         fireRemoteDirect(correctIdx)
         task.wait(0.5)
         if not getQuizPanel() then
             setQuizStatus("answered: " .. target)
             return true
         end
-        print("[Quiz] Remote didn't work, trying VIM")
     end
 
-    -- Strategy 2: real VIM click with inset fix + longer delay
     if AUTO_ANSWER_QUIZ then
-        print("[Quiz] Attempt: VIM click")
         realClick(correctChoice)
         task.wait(0.6)
         if not getQuizPanel() then
             setQuizStatus("answered: " .. target)
             return true
         end
-        print("[Quiz] VIM click didn't register")
     end
 
     return false
@@ -521,7 +492,7 @@ end)
 -------------------------------------------------
 -- Main fishing loop
 -------------------------------------------------
-task.spawn(function()
+local extracted = function()
     while true do
         if isRunning then
             updateTimer()
@@ -536,12 +507,11 @@ task.spawn(function()
                 tracked = {}
                 task.wait(1)
             elseif not waitingForBite and os.clock() - lastCast >= CAST_COOLDOWN then
-                faceLake()
                 setStatus("Casting...")
                 snapshot()
                 click()
                 lastCast = os.clock()
-                task.wait(2.5)
+                task.wait(1)
                 local parts = findNewParts()
                 if #parts > 0 then
                     tracked = {}
@@ -562,7 +532,8 @@ task.spawn(function()
         end
         task.wait(0.15)
     end
-end)
+end
+task.spawn(extracted)
 
 -------------------------------------------------
 -- Controls
@@ -609,4 +580,4 @@ UserInputService.InputChanged:Connect(function(input)
     end
 end)
 
-print("[AutoFish+Quiz] Loaded (v8)")
+print("[AutoFish] Water spots loaded")
