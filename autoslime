@@ -1,0 +1,445 @@
+-- Lighter Scan Version
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local VirtualInputManager = game:GetService("VirtualInputManager")
+local player = Players.LocalPlayer
+
+-- Cleanup old
+if _G.SlimeOrbitCleanup then
+    pcall(_G.SlimeOrbitCleanup)
+end
+
+-- Config
+local PRIORITY = {
+    ["Orange"] = 1,
+    ["Pink"] = 2,
+    ["Purple"] = 3,
+    ["Blue"] = 4,
+    ["Green"] = 5,
+}
+local ABOVE_DISTANCE = 6
+local ATTACK_INTERVAL = 0.1
+local MIN_Y = 180
+local MOVE_SPEED = 40
+
+-- Decoy positions to avoid
+local DECOY_POSITIONS = {
+    Vector3.new(24, 197, -112),
+    Vector3.new(8, 201, -80),
+}
+local DECOY_RADIUS = 25
+
+local isRunning = false
+local isMinimized = false
+local currentTarget = nil
+local lastClick = 0
+local startTime = 0
+local velocity = nil
+local noclipConn = nil
+
+-- ========== FUNCTIONS ==========
+local function getSlimeColor(model)
+    local outside = model:FindFirstChild("Outside")
+    if not outside or not outside:IsA("BasePart") then return "Unknown" end
+    local c = outside.Color
+    local r, g, b = c.R, c.G, c.B
+    if g > 0.5 and g > r and g > b then return "Green"
+    elseif b > 0.4 and b > r and b > g then return "Blue"
+    elseif r > 0.7 and b > 0.5 and g > 0.3 and g < 0.7 then return "Pink"
+    elseif r > 0.4 and b > 0.4 and g < 0.4 then return "Purple"
+    elseif r > 0.5 and g > 0.3 and b < 0.3 then return "Orange"
+    end
+    return "Unknown"
+end
+
+local function isDecoy(position)
+    if position.Y < MIN_Y then return true end
+    for _, decoyPos in ipairs(DECOY_POSITIONS) do
+        if (position - decoyPos).Magnitude <= DECOY_RADIUS then
+            return true
+        end
+    end
+    return false
+end
+
+local function findBestSlime()
+    local best, bestPriority = nil, math.huge
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj.Name:lower():find("slime") then
+            local root = obj.PrimaryPart
+                or obj:FindFirstChild("HumanoidRootPart")
+                or obj:FindFirstChild("HB")
+                or obj:FindFirstChildWhichIsA("BasePart")
+            if root and root:IsA("BasePart") and not isDecoy(root.Position) then
+                local color = getSlimeColor(obj)
+                local priority = PRIORITY[color]
+                if priority and priority < bestPriority then
+                    bestPriority = priority
+                    best = {
+                        model = obj,
+                        root = root,
+                        color = color,
+                        priority = priority
+                    }
+                end
+            end
+        end
+    end
+    return best
+end
+
+local function getGreenSlime()
+    for _, obj in ipairs(workspace:GetDescendants()) do
+        if obj:IsA("Model") and obj.Name:lower():find("slime") then
+            local root = obj.PrimaryPart
+                or obj:FindFirstChild("HumanoidRootPart")
+                or obj:FindFirstChild("HB")
+                or obj:FindFirstChildWhichIsA("BasePart")
+            if root and root:IsA("BasePart") and not isDecoy(root.Position) then
+                local color = getSlimeColor(obj)
+                if color == "Green" then
+                    return {
+                        model = obj,
+                        root = root,
+                        color = color,
+                        priority = PRIORITY[color]
+                    }
+                end
+            end
+        end
+    end
+    return nil
+end
+
+local function isTargetAlive(target)
+    return target and target.root and target.root.Parent and target.model and target.model.Parent
+end
+
+local function click()
+    local camera = workspace.CurrentCamera
+    if not camera then return end
+    local x, y = camera.ViewportSize.X / 2, camera.ViewportSize.Y / 2
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
+    task.wait(0.01)
+    VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+end
+
+local function createVelocity(hrp)
+    if velocity then velocity:Destroy() end
+    velocity = Instance.new("LinearVelocity")
+    velocity.MaxForce = math.huge
+    velocity.VectorVelocity = Vector3.zero
+    velocity.Attachment0 = hrp.RootAttachment or hrp:FindFirstChildOfClass("Attachment")
+    if not velocity.Attachment0 then
+        local att = Instance.new("Attachment")
+        att.Parent = hrp
+        velocity.Attachment0 = att
+    end
+    velocity.Parent = hrp
+end
+
+local function removeVelocity()
+    if velocity then
+        velocity:Destroy()
+        velocity = nil
+    end
+end
+
+local function enableNoclip()
+    if noclipConn then return end
+    noclipConn = RunService.Stepped:Connect(function()
+        local char = player.Character
+        if not char then return end
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") then
+                part.CanCollide = false
+            end
+        end
+    end)
+end
+
+local function disableNoclip()
+    if noclipConn then
+        noclipConn:Disconnect()
+        noclipConn = nil
+    end
+    local char = player.Character
+    if char then
+        for _, part in ipairs(char:GetDescendants()) do
+            if part:IsA("BasePart") and part.Name ~= "HumanoidRootPart" then
+                part.CanCollide = true
+            end
+        end
+    end
+end
+
+local function formatTime(seconds)
+    local mins = math.floor(seconds / 60)
+    local secs = math.floor(seconds % 60)
+    return string.format("%02d:%02d", mins, secs)
+end
+
+-- ========== GUI ==========
+local screenGui = Instance.new("ScreenGui")
+screenGui.Name = "SlimeOrbitGUI"
+screenGui.ResetOnSpawn = false
+screenGui.Parent = game:GetService("CoreGui")
+
+local mainFrame = Instance.new("Frame")
+mainFrame.Size = UDim2.new(0, 240, 0, 230)
+mainFrame.Position = UDim2.new(0, 20, 0.5, -115)
+mainFrame.BackgroundColor3 = Color3.fromRGB(16, 16, 20)
+mainFrame.BorderSizePixel = 0
+mainFrame.Parent = screenGui
+
+Instance.new("UICorner", mainFrame).CornerRadius = UDim.new(0, 10)
+Instance.new("UIStroke", mainFrame).Color = Color3.fromRGB(40, 40, 48)
+
+local header = Instance.new("Frame")
+header.Size = UDim2.new(1, 0, 0, 40)
+header.BackgroundColor3 = Color3.fromRGB(22, 22, 28)
+header.BorderSizePixel = 0
+header.Parent = mainFrame
+Instance.new("UICorner", header).CornerRadius = UDim.new(0, 10)
+
+local headerTitle = Instance.new("TextLabel")
+headerTitle.Size = UDim2.new(1, -50, 1, 0)
+headerTitle.Position = UDim2.new(0, 14, 0, 0)
+headerTitle.BackgroundTransparency = 1
+headerTitle.Text = "Slime Orbit"
+headerTitle.TextColor3 = Color3.fromRGB(240, 240, 240)
+headerTitle.Font = Enum.Font.GothamBold
+headerTitle.TextSize = 16
+headerTitle.TextXAlignment = Enum.TextXAlignment.Left
+headerTitle.Parent = header
+
+local minimizeBtn = Instance.new("TextButton")
+minimizeBtn.Size = UDim2.new(0, 28, 0, 22)
+minimizeBtn.Position = UDim2.new(1, -36, 0.5, -11)
+minimizeBtn.BackgroundColor3 = Color3.fromRGB(40, 40, 50)
+minimizeBtn.Text = "−"
+minimizeBtn.TextColor3 = Color3.fromRGB(220, 220, 220)
+minimizeBtn.Font = Enum.Font.GothamBold
+minimizeBtn.TextSize = 16
+minimizeBtn.Parent = header
+Instance.new("UICorner", minimizeBtn).CornerRadius = UDim.new(0, 5)
+
+local content = Instance.new("Frame")
+content.Size = UDim2.new(1, -20, 1, -56)
+content.Position = UDim2.new(0, 10, 0, 48)
+content.BackgroundTransparency = 1
+content.Parent = mainFrame
+
+local statusBox = Instance.new("Frame")
+statusBox.Size = UDim2.new(1, 0, 0, 40)
+statusBox.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+statusBox.Parent = content
+Instance.new("UICorner", statusBox).CornerRadius = UDim.new(0, 8)
+
+local statusLabel = Instance.new("TextLabel")
+statusLabel.Size = UDim2.new(1, -16, 1, -8)
+statusLabel.Position = UDim2.new(0, 10, 0, 4)
+statusLabel.BackgroundTransparency = 1
+statusLabel.Text = "Status: Stopped"
+statusLabel.TextColor3 = Color3.fromRGB(170, 170, 180)
+statusLabel.Font = Enum.Font.Gotham
+statusLabel.TextSize = 13
+statusLabel.TextWrapped = true
+statusLabel.TextXAlignment = Enum.TextXAlignment.Left
+statusLabel.Parent = statusBox
+
+local targetLabel = Instance.new("TextLabel")
+targetLabel.Size = UDim2.new(1, 0, 0, 22)
+targetLabel.Position = UDim2.new(0, 0, 0, 46)
+targetLabel.BackgroundTransparency = 1
+targetLabel.Text = "Target: None"
+targetLabel.TextColor3 = Color3.fromRGB(140, 180, 255)
+targetLabel.Font = Enum.Font.Gotham
+targetLabel.TextSize = 12
+targetLabel.Parent = content
+
+local runtimeLabel = Instance.new("TextLabel")
+runtimeLabel.Size = UDim2.new(1, 0, 0, 20)
+runtimeLabel.Position = UDim2.new(0, 0, 0, 68)
+runtimeLabel.BackgroundTransparency = 1
+runtimeLabel.Text = "Runtime: 00:00"
+runtimeLabel.TextColor3 = Color3.fromRGB(180, 220, 180)
+runtimeLabel.Font = Enum.Font.Gotham
+runtimeLabel.TextSize = 12
+runtimeLabel.TextXAlignment = Enum.TextXAlignment.Left
+runtimeLabel.Parent = content
+
+local toggleSection = Instance.new("Frame")
+toggleSection.Size = UDim2.new(1, 0, 0, 42)
+toggleSection.Position = UDim2.new(0, 0, 0, 96)
+toggleSection.BackgroundColor3 = Color3.fromRGB(24, 24, 30)
+toggleSection.Parent = content
+Instance.new("UICorner", toggleSection).CornerRadius = UDim.new(0, 8)
+
+local toggleLabel = Instance.new("TextLabel")
+toggleLabel.Size = UDim2.new(0.55, 0, 1, 0)
+toggleLabel.Position = UDim2.new(0, 12, 0, 0)
+toggleLabel.BackgroundTransparency = 1
+toggleLabel.Text = "Auto Farm"
+toggleLabel.TextColor3 = Color3.fromRGB(220, 220, 220)
+toggleLabel.Font = Enum.Font.GothamMedium
+toggleLabel.TextSize = 14
+toggleLabel.TextXAlignment = Enum.TextXAlignment.Left
+toggleLabel.Parent = toggleSection
+
+local toggleBtn = Instance.new("TextButton")
+toggleBtn.Size = UDim2.new(0, 70, 0, 26)
+toggleBtn.Position = UDim2.new(1, -82, 0.5, -13)
+toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+toggleBtn.Text = "OFF"
+toggleBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+toggleBtn.Font = Enum.Font.GothamBold
+toggleBtn.TextSize = 13
+toggleBtn.Parent = toggleSection
+Instance.new("UICorner", toggleBtn).CornerRadius = UDim.new(0, 6)
+
+local function setStatus(text)
+    statusLabel.Text = "Status: " .. text
+end
+
+local function updateButton()
+    if isRunning then
+        toggleBtn.Text = "ON"
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(40, 150, 70)
+    else
+        toggleBtn.Text = "OFF"
+        toggleBtn.BackgroundColor3 = Color3.fromRGB(180, 45, 45)
+        setStatus("Stopped")
+        targetLabel.Text = "Target: None"
+        runtimeLabel.Text = "Runtime: 00:00"
+    end
+end
+
+local function toggleMinimize()
+    isMinimized = not isMinimized
+    content.Visible = not isMinimized
+    if isMinimized then
+        mainFrame.Size = UDim2.new(0, 240, 0, 40)
+        minimizeBtn.Text = "+"
+    else
+        mainFrame.Size = UDim2.new(0, 240, 0, 230)
+        minimizeBtn.Text = "−"
+    end
+end
+
+-- Draggable
+local dragging, dragStart, startPos
+header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = true
+        dragStart = input.Position
+        startPos = mainFrame.Position
+    end
+end)
+header.InputEnded:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1 or input.UserInputType == Enum.UserInputType.Touch then
+        dragging = false
+    end
+end)
+game:GetService("UserInputService").InputChanged:Connect(function(input)
+    if dragging and (input.UserInputType == Enum.UserInputType.MouseMovement or input.UserInputType == Enum.UserInputType.Touch) then
+        local delta = input.Position - dragStart
+        mainFrame.Position = UDim2.new(startPos.X.Scale, startPos.X.Offset + delta.X, startPos.Y.Scale, startPos.Y.Offset + delta.Y)
+    end
+end)
+
+-- ========== MAIN LOOP ==========
+local renderConn = RunService.Heartbeat:Connect(function()
+    if not isRunning then return end
+
+    if startTime > 0 then
+        runtimeLabel.Text = "Runtime: " .. formatTime(tick() - startTime)
+    end
+
+    local char = player.Character
+    local hrp = char and char:FindFirstChild("HumanoidRootPart")
+    if not hrp then return end
+
+    if not velocity then
+        createVelocity(hrp)
+    end
+
+    -- Only scan when we need a new target
+    if not isTargetAlive(currentTarget) then
+        local best = findBestSlime()
+        if best then
+            currentTarget = best
+            setStatus("Above " .. best.color)
+            targetLabel.Text = "Target: " .. best.color .. " Slime"
+        else
+            currentTarget = nil
+            setStatus("Searching...")
+            targetLabel.Text = "Target: None"
+            if velocity then velocity.VectorVelocity = Vector3.zero end
+            return
+        end
+    end
+
+    if isTargetAlive(currentTarget) and velocity then
+        local targetPos = currentTarget.root.Position + Vector3.new(0, ABOVE_DISTANCE, 0)
+        local direction = (targetPos - hrp.Position)
+        local dist = direction.Magnitude
+
+        if dist > 1.5 then
+            velocity.VectorVelocity = direction.Unit * math.min(MOVE_SPEED, dist * 4)
+        else
+            velocity.VectorVelocity = Vector3.zero
+        end
+
+        if tick() - lastClick >= ATTACK_INTERVAL then
+            lastClick = tick()
+            click()
+        end
+    end
+end)
+
+toggleBtn.MouseButton1Click:Connect(function()
+    isRunning = not isRunning
+    updateButton()
+
+    local hrp = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+
+    if isRunning then
+        startTime = tick()
+        enableNoclip()
+        setStatus("Starting...")
+        if hrp then createVelocity(hrp) end
+        local green = getGreenSlime()
+        if green then
+            currentTarget = green
+            setStatus("Above Green")
+            targetLabel.Text = "Target: Green Slime"
+        else
+            setStatus("No valid Green found")
+        end
+    else
+        currentTarget = nil
+        removeVelocity()
+        disableNoclip()
+        startTime = 0
+        setStatus("Stopped")
+        targetLabel.Text = "Target: None"
+    end
+end)
+
+minimizeBtn.MouseButton1Click:Connect(toggleMinimize)
+
+-- Cleanup
+_G.SlimeOrbitCleanup = function()
+    pcall(function()
+        if renderConn then renderConn:Disconnect() end
+        if screenGui then screenGui:Destroy() end
+        removeVelocity()
+        disableNoclip()
+    end)
+    isRunning = false
+    currentTarget = nil
+end
+
+updateButton()
+print("[SlimeOrbit] Lighter scan version loaded")
