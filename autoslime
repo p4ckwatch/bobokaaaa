@@ -1,4 +1,4 @@
--- Lighter Scan Version
+-- Lighter Scan + Force Weapon Back
 local Players = game:GetService("Players")
 local RunService = game:GetService("RunService")
 local VirtualInputManager = game:GetService("VirtualInputManager")
@@ -21,6 +21,7 @@ local ABOVE_DISTANCE = 6
 local ATTACK_INTERVAL = 0.1
 local MIN_Y = 180
 local MOVE_SPEED = 40
+local EQUIP_CHECK_INTERVAL = 1
 
 -- Decoy positions to avoid
 local DECOY_POSITIONS = {
@@ -33,9 +34,13 @@ local isRunning = false
 local isMinimized = false
 local currentTarget = nil
 local lastClick = 0
+local lastEquipCheck = 0
 local startTime = 0
 local velocity = nil
 local noclipConn = nil
+
+-- Remote
+local RequestEquipSlot = game:GetService("ReplicatedStorage"):WaitForChild("Remotes"):WaitForChild("RequestEquipSlot")
 
 -- ========== FUNCTIONS ==========
 local function getSlimeColor(model)
@@ -122,6 +127,25 @@ local function click()
     VirtualInputManager:SendMouseButtonEvent(x, y, 0, true, game, 0)
     task.wait(0.01)
     VirtualInputManager:SendMouseButtonEvent(x, y, 0, false, game, 0)
+end
+
+local function getEquippedTool()
+    local char = player.Character
+    if not char then return nil end
+    return char:FindFirstChildOfClass("Tool")
+end
+
+local function isWeaponEquipped()
+    local tool = getEquippedTool()
+    if not tool then return false end
+    local name = tool.Name:lower()
+    return name:find("sword") or name:find("weapon")
+end
+
+local function forceWeapon()
+    pcall(function()
+        RequestEquipSlot:FireServer("Weapon")
+    end)
 end
 
 local function createVelocity(hrp)
@@ -364,6 +388,14 @@ local renderConn = RunService.Heartbeat:Connect(function()
         createVelocity(hrp)
     end
 
+    -- Check every second and force weapon if wrong tool is equipped
+    if tick() - lastEquipCheck >= EQUIP_CHECK_INTERVAL then
+        lastEquipCheck = tick()
+        if not isWeaponEquipped() then
+            forceWeapon()
+        end
+    end
+
     -- Only scan when we need a new target
     if not isTargetAlive(currentTarget) then
         local best = findBestSlime()
@@ -407,6 +439,7 @@ toggleBtn.MouseButton1Click:Connect(function()
     if isRunning then
         startTime = tick()
         enableNoclip()
+        forceWeapon()
         setStatus("Starting...")
         if hrp then createVelocity(hrp) end
         local green = getGreenSlime()
@@ -442,4 +475,4 @@ _G.SlimeOrbitCleanup = function()
 end
 
 updateButton()
-print("[SlimeOrbit] Lighter scan version loaded")
+print("[SlimeOrbit] Force weapon back version loaded")
